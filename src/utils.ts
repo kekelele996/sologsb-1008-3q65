@@ -1,4 +1,4 @@
-import type { DiffToken, SignItem, TermBinding } from "./types";
+import type { DiffToken, ServiceRecord, SiteRecord, TermBinding } from "./types";
 
 export function estimatedLines(text: string, width: number, fontSize: number, lineHeight = 1.25) {
   if (!text.trim()) return [];
@@ -31,7 +31,7 @@ export function estimatedLines(text: string, width: number, fontSize: number, li
   return lines;
 }
 
-export function analyzeSign(sign: SignItem, width: number, fontSize: number) {
+export function analyzeSign(sign: { targetText: string; terms: TermBinding[] }, width: number, fontSize: number) {
   const lines = estimatedLines(sign.targetText, width, fontSize);
   const lineCapacity = Math.max(1, Math.floor((width * 0.62) / (fontSize * 1.25)));
   const visible = lines.slice(0, lineCapacity);
@@ -103,4 +103,87 @@ export function diffText(oldText: string, newText: string): DiffToken[] {
 
 export function cloneTerms(terms: TermBinding[]) {
   return structuredClone(terms);
+}
+
+/** 按毫米折算字宽：可印区域与最小字号都是现场实测（mm）。 */
+function charWidthMm(char: string, fontSizeMm: number) {
+  if (/[⺀-鿿぀-ヿ가-힯]/.test(char)) return fontSizeMm;
+  if (char === " ") return fontSizeMm * 0.34;
+  return fontSizeMm * 0.58;
+}
+
+/** 以 mm 为单位按可印宽度折行，返回每行文本与宽度。 */
+export function wrapMm(text: string, usableWidthMm: number, fontSizeMm: number) {
+  const lines: string[] = [];
+  const widths: number[] = [];
+  for (const hardLine of text.split("\n")) {
+    if (!hardLine) {
+      lines.push("");
+      widths.push(0);
+      continue;
+    }
+    let current = "";
+    let currentWidth = 0;
+    for (const char of hardLine) {
+      const charWidth = charWidthMm(char, fontSizeMm);
+      if (current && currentWidth + charWidth > usableWidthMm) {
+        lines.push(current.trimEnd());
+        widths.push(currentWidth);
+        current = char.trimStart();
+        currentWidth = charWidth;
+      } else {
+        current += char;
+        currentWidth += charWidth;
+      }
+    }
+    if (current) {
+      lines.push(current.trimEnd());
+      widths.push(currentWidth);
+    }
+  }
+  return { lines, widths };
+}
+
+export interface LayoutCheck {
+  /** 译文在现场可印区域内、且不小于最小可读字号时能否排下。 */
+  fits: boolean;
+  /** 需退回重核（排不下）。 */
+  returnForReview: boolean;
+  lines: string[];
+  lineWidths: number[];
+  linesNeeded: number;
+  linesCapacity: number;
+  lineHeightMm: number;
+  tooManyLines: boolean;
+  tooWide: boolean;
+  missingTerms: TermBinding[];
+}
+
+/**
+ * 版面牵制校核：只使用现场那份实测的可印区域与最小可读字号。
+ * 排不下就标出退回重核——不自动缩字号，也不改现场量到的数字。
+ */
+export function layoutCheck(site: SiteRecord, service: ServiceRecord): LayoutCheck {
+  const minFont = site.minFontSize;
+  const lineHeightMm = minFont * 1.3;
+  const linesCapacity = Math.max(1, Math.floor(site.printableHeight / lineHeightMm));
+  const { lines, widths } = wrapMm(service.targetText, site.printableWidth, minFont);
+  const tooManyLines = lines.length > linesCapacity;
+  const tooWide = widths.some((width) => width > site.printableWidth + 0.5);
+  const missingTerms = service.terms.filter(
+    (term) => term.required && !service.targetText.toLocaleLowerCase().includes(term.target.toLocaleLowerCase()),
+  );
+  const fits = !tooManyLines && !tooWide;
+  return {
+    fits,
+    returnForReview: !fits,
+    lines,
+    lineWidths: widths,
+    linesNeeded: lines.length,
+    linesCapacity,
+    lineHeightMm,
+    tooManyLines,
+    tooWide,
+    missingTerms,
+  };
 }
