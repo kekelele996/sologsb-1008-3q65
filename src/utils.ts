@@ -1,8 +1,14 @@
-import type { DiffToken, SignItem, TermBinding } from "./types";
+import type { DiffToken, FitVerdict, PrintableArea, TermBinding } from "./types";
 
-export function estimatedLines(text: string, width: number, fontSize: number, lineHeight = 1.25) {
+const CJK_RE = /[㐀-鿿぀-ヿ가-힯]/;
+
+/**
+ * 按给定字号（mm）做保守换行估算，用于“排不排得下”的判定。
+ * 判定专用，不改变现场实测的任何数字。
+ */
+export function layoutLines(text: string, printWidthMm: number, fontMm: number, lineHeight = 1.2) {
   if (!text.trim()) return [];
-  const usable = Math.max(120, width - 48);
+  const usable = Math.max(1, printWidthMm);
   const lines: string[] = [];
   for (const hardLine of text.split("\n")) {
     if (!hardLine) {
@@ -12,11 +18,7 @@ export function estimatedLines(text: string, width: number, fontSize: number, li
     let current = "";
     let currentWidth = 0;
     for (const char of hardLine) {
-      const charWidth = /[\u2e80-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(char)
-        ? fontSize
-        : char === " "
-          ? fontSize * 0.34
-          : fontSize * 0.58;
+      const charWidth = CJK_RE.test(char) ? fontMm : char === " " ? fontMm * 0.35 : fontMm * 0.6;
       if (current && currentWidth + charWidth > usable) {
         lines.push(current.trimEnd());
         current = char.trimStart();
@@ -31,29 +33,45 @@ export function estimatedLines(text: string, width: number, fontSize: number, li
   return lines;
 }
 
-export function analyzeSign(sign: SignItem, width: number, fontSize: number) {
-  const lines = estimatedLines(sign.targetText, width, fontSize);
-  const lineCapacity = Math.max(1, Math.floor((width * 0.62) / (fontSize * 1.25)));
-  const visible = lines.slice(0, lineCapacity);
-  const overflow = lines.length > lineCapacity;
-  const longest = lines.reduce((max, line) => Math.max(max, line.length), 0);
-  const estimatedCharacterLimit = Math.max(12, Math.floor((width - 48) / (fontSize * 0.55)) * lineCapacity);
-  const tooLong = sign.targetText.replace(/\s/g, "").length > estimatedCharacterLimit;
-  const missingTerms = sign.terms.filter(
-    (term) => term.required && !sign.targetText.toLocaleLowerCase().includes(term.target.toLocaleLowerCase()),
+export function lineCapacityFor(area: Pick<PrintableArea, "printHeightMm" | "minFontMm">, lineHeight = 1.2) {
+  if (area.printHeightMm == null || area.minFontMm == null) return null;
+  return Math.max(1, Math.floor(area.printHeightMm / (area.minFontMm * lineHeight)));
+}
+
+/**
+ * 版面判定：只用现场实测的可印区域与最小可读字号。
+ * 排不下 → fits=false 并给出原因；绝不通过缩字号来“排下”。
+ */
+export function evaluateFit(
+  text: string,
+  area: PrintableArea,
+  code: string,
+): FitVerdict {
+  const { printWidthMm, printHeightMm, minFontMm } = area;
+  if (printWidthMm == null || printHeightMm == null || minFontMm == null) {
+    return { fits: false, measured: false, lines: [], lineCapacity: 0, reasons: ["现场尚未实测可印区域与最小可读字号"] };
+  }
+  const lines = layoutLines(text, printWidthMm, minFontMm);
+  const capacity = lineCapacityFor(area)!;
+  const overflow = lines.length > capacity;
+  const reasons: string[] = [];
+  if (overflow) {
+    reasons.push(
+      `牌子 ${code}：按最小可读字号 ${minFontMm}mm、可印区域 ${printWidthMm}×${printHeightMm}mm 排版需 ${lines.length} 行，区域只能容纳 ${capacity} 行，排不下`,
+    );
+  }
+  return { fits: !overflow, measured: true, lines, lineCapacity: capacity, reasons };
+}
+
+/** 必选术语未命中检查（服务中心职责）。 */
+export function missingRequiredTerms(targetText: string, terms: TermBinding[]) {
+  return terms.filter(
+    (term) => term.required && !targetText.toLocaleLowerCase().includes(term.target.toLocaleLowerCase()),
   );
-  return {
-    lines,
-    visible,
-    overflow,
-    tooLong,
-    missingTerms,
-    risk: overflow || tooLong || missingTerms.length ? "high" : lines.length >= lineCapacity - 1 ? "medium" : "low",
-  };
 }
 
 function tokenize(value: string) {
-  return value.match(/[\u3400-\u9fff]|[A-Za-zÀ-ÿ0-9'’\-]+|\s+|./gu) ?? [];
+  return value.match(/[㐀-鿿]|[A-Za-zÀ-ÿ0-9''\-]+|\s+|./gu) ?? [];
 }
 
 function lcsTable(left: string[], right: string[]) {
